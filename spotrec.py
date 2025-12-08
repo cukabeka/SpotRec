@@ -536,11 +536,12 @@ class FFmpeg:
         if _output_format == "flac":
             codec_params = '-acodec flac'
         elif _output_format == "mp3":
-            codec_params = f'-acodec libmp3lame -b:a {_output_quality}k'
+            # Escape quality parameter to prevent injection
+            codec_params = f'-acodec libmp3lame -b:a {shlex.quote(_output_quality)}k'
         elif _output_format == "ogg":
-            codec_params = f'-acodec libvorbis -q:a {_output_quality}'
+            codec_params = f'-acodec libvorbis -q:a {shlex.quote(_output_quality)}'
         elif _output_format == "m4a":
-            codec_params = f'-acodec aac -b:a {_output_quality}k'
+            codec_params = f'-acodec aac -b:a {shlex.quote(_output_quality)}k'
         else:
             # Default to FLAC
             codec_params = '-acodec flac'

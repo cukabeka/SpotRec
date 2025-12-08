@@ -90,8 +90,8 @@ install_ncspot() {
             fi
             
             # Install build dependencies
-            sudo zypper install -y gcc pkg-config libopenssl-devel dbus-1-devel \
-                ncurses-devel pulseaudio-devel libxcb-devel
+            sudo zypper install -y gcc pkg-config openssl-devel dbus-1-devel \
+                ncurses-devel libpulse-devel libxcb-devel
             
             # Install ncspot
             cargo install --locked ncspot
