@@ -278,24 +278,25 @@ class Spotify:
             playlist_uri = f"spotify:playlist:{playlist_id}"
             log.info(f"[{app_name}] Opening playlist: {playlist_uri}")
             
-            # Use D-Bus to open the URI
-            Shell.run(f'dbus-send --print-reply --dest={self.dbus_dest} '
-                     f'{self.dbus_path} org.mpris.MediaPlayer2.Player.OpenUri '
-                     f'string:"{playlist_uri}"')
+            # Use D-Bus to open the URI (properly escaped to prevent injection)
+            Shell.run(f'dbus-send --print-reply --dest={shlex.quote(self.dbus_dest)} '
+                     f'{shlex.quote(self.dbus_path)} org.mpris.MediaPlayer2.Player.OpenUri '
+                     f'string:{shlex.quote(playlist_uri)}')
             
-            # Give the client time to load the playlist
+            # Give the client time to load the playlist (2 seconds is typical for playlist loading)
             time.sleep(2)
             
             # Start playback
             self.send_dbus_cmd("Play")
             log.info(f"[{app_name}] Playlist playback started")
-        except Exception as e:
+        except (subprocess.CalledProcessError, DBusException) as e:
             log.error(f"[{app_name}] Failed to play playlist: {e}")
 
     # TODO: this is a dirty solution (uses cmdline instead of python for now)
     def send_dbus_cmd(self, cmd):
-        Shell.run('dbus-send --print-reply --dest=' + self.dbus_dest +
-                  ' ' + self.dbus_path + ' ' + self.mpris_player_string + '.' + cmd)
+        # Properly escape all parameters to prevent shell injection
+        Shell.run('dbus-send --print-reply --dest=' + shlex.quote(self.dbus_dest) +
+                  ' ' + shlex.quote(self.dbus_path) + ' ' + shlex.quote(self.mpris_player_string + '.' + cmd))
 
     def quit_glib_loop(self):
         if self.glibloop is not None:
