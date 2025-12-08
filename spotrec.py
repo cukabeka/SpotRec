@@ -45,6 +45,8 @@ _filename_pattern = "{trackNumber} - {artist} - {title}"
 _underscored_filenames = False
 _use_internal_track_counter = False
 _add_cover_art = False
+_client = "spotify"  # Default client: spotify or ncspot
+_playlist_id = None  # Playlist ID to record
 
 # Hard-coded settings
 _pa_recording_sink_name = "spotrec"
@@ -131,6 +133,8 @@ def handle_command_line():
     global _underscored_filenames
     global _use_internal_track_counter
     global _add_cover_art
+    global _client
+    global _playlist_id
 
     parser = argparse.ArgumentParser(
         description=app_name + " v" + app_version, formatter_class=argparse.RawTextHelpFormatter)
@@ -138,7 +142,7 @@ def handle_command_line():
                         action="store_true", default=_debug_logging)
     parser.add_argument("-s", "--skip-intro", help="Skip the intro message",
                         action="store_true", default=_skip_intro)
-    parser.add_argument("-m", "--mute-recording", help="Mute Spotify on your main output device while recording",
+    parser.add_argument("-m", "--mute-recording", help="Mute the client on your main output device while recording",
                         action="store_true", default=_mute_pa_recording_sink)
     parser.add_argument("-o", "--output-directory", help="Where to save the recordings\n"
                                                          "Default: " + _output_directory, default=_output_directory)
@@ -149,10 +153,17 @@ def handle_command_line():
                                                          "Example: \"{artist}/{album}/{trackNumber} {title}\"", default=_filename_pattern)
     parser.add_argument("-u", "--underscored-filenames", help="Force the file names to have underscores instead of whitespaces",
                         action="store_true", default=_underscored_filenames)
-    parser.add_argument("-c", "--internal-track-counter", help="Replace Spotify's trackNumber with own counter. Useable for preserving a playlist file order",
+    parser.add_argument("-c", "--internal-track-counter", help="Replace track number with own counter. Useful for preserving a playlist file order",
                         action="store_true", default=_use_internal_track_counter)
-    parser.add_argument("-a", "--add-cover-art", help="Embed the cover art from Spotify into the file",
+    parser.add_argument("-a", "--add-cover-art", help="Embed the cover art into the file",
                         action="store_true", default=_add_cover_art)
+    parser.add_argument("--client", help="Spotify client to use\n"
+                                         "Default: spotify\n"
+                                         "Options: spotify, ncspot", 
+                        choices=["spotify", "ncspot"], default=_client)
+    parser.add_argument("--playlist-id", help="Spotify playlist ID to record\n"
+                                              "Example: 37i9dQZF1DXcBWIGoYBM5M", 
+                        default=_playlist_id)
 
     args = parser.parse_args()
 
@@ -171,6 +182,10 @@ def handle_command_line():
     _use_internal_track_counter = args.internal_track_counter
 
     _add_cover_art = args.add_cover_art
+
+    _client = args.client
+
+    _playlist_id = args.playlist_id
 
 
 def init_log():
@@ -195,6 +210,14 @@ class Spotify:
     mpris_player_string = "org.mpris.MediaPlayer2.Player"
 
     def __init__(self):
+        # Configure D-Bus destination based on client
+        if _client == "ncspot":
+            self.dbus_dest = "org.mpris.MediaPlayer2.ncspot"
+            self.application_name = "ncspot"
+        else:
+            self.dbus_dest = "org.mpris.MediaPlayer2.spotify"
+            self.application_name = "spotify"
+        
         self.glibloop = None
 
         dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
@@ -211,7 +234,7 @@ class Spotify:
             self.update_metadata()
         except DBusException:
             log.error(
-                f"Error: Could not connect to the Spotify Client. It has to be running first before starting {app_name}.")
+                f"Error: Could not connect to the {_client} client. It has to be running first before starting {app_name}.")
             sys.exit(1)
             pass
 
@@ -219,6 +242,10 @@ class Spotify:
         self.trackid = self.metadata.get(dbus.String(u'mpris:trackid'))
         self.playbackstatus = self.iface.Get(
             self.mpris_player_string, "PlaybackStatus")
+
+        # If playlist ID is provided, play it
+        if _playlist_id:
+            self.play_playlist(_playlist_id)
 
         self.iface.connect_to_signal(
             "PropertiesChanged", self.on_playing_uri_changed)
@@ -239,10 +266,31 @@ class Spotify:
         dbuslistener = DBusListenerThread(self)
         dbuslistener.start()
 
-        log.info(f"[{app_name}] Spotify DBus listener started")
+        log.info(f"[{app_name}] {_client.capitalize()} DBus listener started")
 
         log.info(f"[{app_name}] Current song: {self.track}")
         log.info(f"[{app_name}] Current state: " + self.playbackstatus)
+
+    def play_playlist(self, playlist_id):
+        """Open and play a Spotify playlist by ID"""
+        try:
+            # Construct the Spotify URI for the playlist
+            playlist_uri = f"spotify:playlist:{playlist_id}"
+            log.info(f"[{app_name}] Opening playlist: {playlist_uri}")
+            
+            # Use D-Bus to open the URI
+            Shell.run(f'dbus-send --print-reply --dest={self.dbus_dest} '
+                     f'{self.dbus_path} org.mpris.MediaPlayer2.Player.OpenUri '
+                     f'string:"{playlist_uri}"')
+            
+            # Give the client time to load the playlist
+            time.sleep(2)
+            
+            # Start playback
+            self.send_dbus_cmd("Play")
+            log.info(f"[{app_name}] Playlist playback started")
+        except Exception as e:
+            log.error(f"[{app_name}] Failed to play playlist: {e}")
 
     # TODO: this is a dirty solution (uses cmdline instead of python for now)
     def send_dbus_cmd(self, cmd):
@@ -253,7 +301,7 @@ class Spotify:
         if self.glibloop is not None:
             self.glibloop.quit()
 
-        log.info(f"[{app_name}] Spotify DBus listener stopped")
+        log.info(f"[{app_name}] {_client.capitalize()} DBus listener stopped")
 
     def get_metadata_for_ffmpeg(self):
         return {
@@ -312,10 +360,10 @@ class Spotify:
                 if self.trackid_when_thread_started != self.parent.trackid:
                     return
 
-                # Spotify pauses when the playlist ended. Don't start a recording / return in this case.
+                # Spotify/ncspot pauses when the playlist ended. Don't start a recording / return in this case.
                 if not self.parent.is_playing():
                     log.info(
-                        f"[{app_name}] Spotify is paused. Maybe the current album or playlist has ended.")
+                        f"[{app_name}] {_client.capitalize()} is paused. Maybe the current album or playlist has ended.")
 
                     # Exit after playlist recorded
                     if not is_script_paused:
@@ -402,12 +450,12 @@ class Spotify:
             self.playbackstatus_changed()
 
     def playing_song_changed(self):
-        log.info("[Spotify] Song changed: " + self.track)
+        log.info(f"[{_client.capitalize()}] Song changed: " + self.track)
 
         self.start_record()
 
     def playbackstatus_changed(self):
-        log.info("[Spotify] State changed: " + self.playbackstatus)
+        log.info(f"[{_client.capitalize()}] State changed: " + self.playbackstatus)
 
         self.init_pa_stuff_if_needed()
 
@@ -670,7 +718,8 @@ class PulseAudio:
         if pa_spotify_sink_input_id > -1:
             return
 
-        application_name = "spotify"
+        # Use the application name based on the selected client
+        application_name = _spotify.application_name
         cmdout = Shell.check_output(
             "pactl list sink-inputs | awk '{print tolower($0)};' | awk '/ #/ {print $0} /application.name = \"" + application_name + "\"/ {print $3};'")
         index = -1
@@ -696,10 +745,10 @@ class PulseAudio:
                         pa_spotify_sink_input_id) + " " + _pa_recording_sink_name).returncode
 
                     if exit_code == 0:
-                        log.info(f"[{app_name}] Moved Spotify to own sink")
+                        log.info(f"[{app_name}] Moved {_client} to own sink")
                     else:
                         log.warning(
-                            f"[{app_name}] Failed to move Spotify to own sink")
+                            f"[{app_name}] Failed to move {_client} to own sink")
 
         move_spotify_to_sink_thread = MoveSpotifyToSinktThread()
         move_spotify_to_sink_thread.start()
