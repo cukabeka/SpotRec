@@ -45,8 +45,10 @@ _filename_pattern = "{trackNumber} - {artist} - {title}"
 _underscored_filenames = False
 _use_internal_track_counter = False
 _add_cover_art = False
-_client = "spotify"  # Default client: spotify or ncspot
+_client = "ncspot"  # Default client: spotify or ncspot
 _playlist_id = None  # Playlist ID to record
+_output_format = "flac"  # Output format: flac, mp3, ogg, m4a
+_output_quality = "320"  # Quality setting for lossy formats
 
 # Hard-coded settings
 _pa_recording_sink_name = "spotrec"
@@ -135,6 +137,8 @@ def handle_command_line():
     global _add_cover_art
     global _client
     global _playlist_id
+    global _output_format
+    global _output_quality
 
     parser = argparse.ArgumentParser(
         description=app_name + " v" + app_version, formatter_class=argparse.RawTextHelpFormatter)
@@ -158,12 +162,22 @@ def handle_command_line():
     parser.add_argument("-a", "--add-cover-art", help="Embed the cover art into the file",
                         action="store_true", default=_add_cover_art)
     parser.add_argument("--client", help="Spotify client to use\n"
-                                         "Default: spotify\n"
+                                         "Default: ncspot\n"
                                          "Options: spotify, ncspot", 
                         choices=["spotify", "ncspot"], default=_client)
     parser.add_argument("--playlist-id", help="Spotify playlist ID to record\n"
                                               "Example: 37i9dQZF1DXcBWIGoYBM5M", 
                         default=_playlist_id)
+    parser.add_argument("--format", help="Output audio format\n"
+                                         "Default: flac\n"
+                                         "Options: flac, mp3, ogg, m4a",
+                        choices=["flac", "mp3", "ogg", "m4a"], default=_output_format)
+    parser.add_argument("--quality", help="Audio quality for lossy formats\n"
+                                          "For mp3: bitrate in kbps (128, 192, 256, 320)\n"
+                                          "For ogg: quality level (0-10, where 10 is best)\n"
+                                          "For m4a: bitrate in kbps\n"
+                                          "Default: 320",
+                        default=_output_quality)
 
     args = parser.parse_args()
 
@@ -186,6 +200,10 @@ def handle_command_line():
     _client = args.client
 
     _playlist_id = args.playlist_id
+
+    _output_format = args.format
+
+    _output_quality = args.quality
 
 
 def init_log():
@@ -505,7 +523,7 @@ class FFmpeg:
         # Use a dot as filename prefix to hide the file until the recording was successful
         self.tmp_file_prefix = "."
         self.filename = self.tmp_file_prefix + \
-            os.path.basename(file) + ".flac"
+            os.path.basename(file) + "." + _output_format
 
         # save this to self because metadata_params is discarded after this function
         self.cover_url = metadata_for_file.pop('cover_url')
@@ -514,18 +532,30 @@ class FFmpeg:
         for key, value in metadata_for_file.items():
             metadata_params += ' -metadata ' + key + '=' + shlex.quote(value)
 
+        # Determine codec and quality settings based on output format
+        if _output_format == "flac":
+            codec_params = '-acodec flac'
+        elif _output_format == "mp3":
+            codec_params = f'-acodec libmp3lame -b:a {_output_quality}k'
+        elif _output_format == "ogg":
+            codec_params = f'-acodec libvorbis -q:a {_output_quality}'
+        elif _output_format == "m4a":
+            codec_params = f'-acodec aac -b:a {_output_quality}k'
+        else:
+            # Default to FLAC
+            codec_params = '-acodec flac'
+
         # FFmpeg Options:
         #  "-hide_banner": short the debug log a little
         #  "-y": overwrite existing files
         #  "-ac 2": always use 2 audio channels (stereo) (same as Spotify)
         #  "-ar 44100": always use 44.1k samplerate (same as Spotify)
         #  "-fragment_size 8820": set recording latency to 50 ms (0.05*44100*2*2) (very high values can cause ffmpeg to not stop fast enough, so post-processing fails)
-        #  "-acodec flac": use the flac lossless audio codec, so we don't lose quality while recording
         self.process = Shell.Popen(_ffmpeg_executable + ' -hide_banner -y '
                                    '-f pulse ' +
                                    '-ac 2 -ar 44100 -fragment_size 8820 ' +
                                    '-i ' + self.pulse_input + metadata_params + ' '
-                                   '-acodec flac' +
+                                   + codec_params +
                                    ' ' + shlex.quote(os.path.join(self.out_dir, self.filename)))
 
         self.pid = str(self.process.pid)
@@ -608,10 +638,12 @@ class FFmpeg:
             return
         # save the image locally -> could use a temp file here
         #   but might add option to keep image later
+        # Get the file extension
+        file_ext = os.path.splitext(fullfilepath)[1]
         cover_file = fullfilepath.rsplit(
-            '.flac', 1)[0]  # remove the extension
+            file_ext, 1)[0]  # remove the extension
         log.debug(f'Saving cover art to {cover_file} + image_ext')
-        temp_file = cover_file + '_withArtwork.' + 'flac'
+        temp_file = cover_file + '_withArtwork' + file_ext
         if self.cover_url.startswith('file://'):
             log.debug(f'[FFmpeg] Cover art is local for {fullfilepath}')
             path = self.cover_url[len('file://'):]

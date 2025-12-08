@@ -1,66 +1,152 @@
 # SpotRec
 
-Python script to record the audio of Spotify clients (official Spotify desktop client or ncspot) using FFmpeg and PulseAudio
+Python script to record audio from Spotify clients (ncspot or official Spotify desktop client) using FFmpeg and PulseAudio
+
+**Default Client**: ncspot (terminal-based, lightweight Spotify client)
 
 AUR: https://aur.archlinux.org/packages/spotrec/
 
 
 
-## Usage
+## Quick Start
 
-### With Official Spotify Client
+### Recommended: Using ncspot (Default)
 
-If you use the AUR package,
-you can simply run:
+The easiest way to get started with SpotRec is using ncspot:
 
-```
-spotrec
-```
-
-If you have a GNU/Linux distribution with a different package manager system,
-run:
-
-```
-python3 spotrec.py
-```
-
-### With ncspot (Terminal Client)
-
-ncspot is a lightweight, terminal-based Spotify client. To use SpotRec with ncspot:
-
-1. Install ncspot (see [ncspot installation](https://github.com/hrkfdn/ncspot))
-
-2. Configure ncspot for SpotRec:
+1. **Run the configuration script** (installs and configures ncspot automatically):
 ```bash
 ./configure-ncspot.sh
 ```
 
-3. Start ncspot:
+2. **Start recording**:
 ```bash
-ncspot
+python3 spotrec.py
 ```
 
-4. In another terminal, run SpotRec with the `--client ncspot` option:
+That's it! The script will automatically start ncspot recording. ncspot is now the default client.
+
+### Alternative: Using Official Spotify Client
+
+If you prefer the official Spotify desktop client:
+
 ```bash
-python3 spotrec.py --client ncspot
+python3 spotrec.py --client spotify
 ```
 
-### Recording a Specific Playlist
+## Installation
 
-You can specify a playlist ID to automatically start recording:
+### Dependencies
+
+- Python 3
+- python-dbus
+- python-gi (GLib)
+- FFmpeg (with libmp3lame, libvorbis, AAC codec support)
+- PulseAudio (pactl)
+- gawk
+- ncspot (installed automatically via configure-ncspot.sh)
+
+### Installing ncspot
+
+The `configure-ncspot.sh` script will automatically install ncspot for your distribution:
 
 ```bash
-# For official Spotify client
+chmod +x configure-ncspot.sh
+./configure-ncspot.sh
+```
+
+Supported distributions:
+- Arch Linux / Manjaro / EndeavourOS (via pacman)
+- Ubuntu / Debian / Linux Mint / Pop!_OS (via cargo)
+- Fedora / RHEL / CentOS (via cargo)
+- openSUSE (via cargo)
+- Other distributions (via cargo)
+
+The script will also:
+- Configure optimal recording settings (320kbps bitrate)
+- Set up PulseAudio backend
+- Disable volume normalization
+- Guide you through Spotify authentication
+
+## Usage
+
+### Basic Recording
+
+```bash
+# Record with ncspot (default)
+python3 spotrec.py
+
+# Record with official Spotify client
+python3 spotrec.py --client spotify
+
+# Custom output directory
+python3 spotrec.py -o ~/Music/Recordings
+```
+
+### Output Formats and Quality
+
+SpotRec supports multiple output formats:
+
+```bash
+# FLAC (lossless, default)
+python3 spotrec.py --format flac
+
+# MP3 with quality settings
+python3 spotrec.py --format mp3 --quality 320   # 320kbps (best)
+python3 spotrec.py --format mp3 --quality 256   # 256kbps
+python3 spotrec.py --format mp3 --quality 192   # 192kbps
+
+# OGG Vorbis with quality settings
+python3 spotrec.py --format ogg --quality 10    # Quality 10 (best)
+python3 spotrec.py --format ogg --quality 6     # Quality 6 (good)
+
+# M4A (AAC) with bitrate
+python3 spotrec.py --format m4a --quality 256   # 256kbps
+```
+
+**Default**: FLAC (lossless) at 320kbps source quality from Spotify
+
+### Recording Playlists
+
+You can specify a playlist ID to automatically record an entire playlist:
+
+```bash
+# Record specific playlist
 python3 spotrec.py --playlist-id 37i9dQZF1DXcBWIGoYBM5M
 
-# For ncspot
-python3 spotrec.py --client ncspot --playlist-id 37i9dQZF1DXcBWIGoYBM5M
+# With custom format
+python3 spotrec.py --playlist-id 37i9dQZF1DXcBWIGoYBM5M --format mp3 --quality 320
 ```
 
-To find a playlist ID:
-- Open Spotify Web Player
-- Navigate to the playlist
-- Copy the ID from the URL: `https://open.spotify.com/playlist/[YOUR_PLAYLIST_ID]`
+**To find a playlist ID:**
+1. Open Spotify Web Player
+2. Navigate to the playlist
+3. Copy the ID from the URL: `https://open.spotify.com/playlist/[YOUR_PLAYLIST_ID]`
+
+### Advanced Options
+
+```bash
+# Add cover art to recordings
+python3 spotrec.py -a
+
+# Custom filename pattern
+python3 spotrec.py -p "{artist}/{album}/{trackNumber} {title}"
+
+# Use internal track counter (preserves playlist order)
+python3 spotrec.py -c
+
+# Underscored filenames (no spaces)
+python3 spotrec.py -u
+
+# Mute audio output while recording
+python3 spotrec.py -m
+
+# Skip intro message
+python3 spotrec.py -s
+
+# Debug mode
+python3 spotrec.py -d
+```
 
 ### Command-Line Options
 
@@ -73,36 +159,70 @@ To find a playlist ID:
                         Where to save the recordings (default: ~/SpotRec)
   -p, --filename-pattern
                         Pattern for file names (default: "{trackNumber} - {artist} - {title}")
+                        Available placeholders: {artist}, {album}, {trackNumber}, {title}
   -u, --underscored-filenames
                         Use underscores instead of spaces in filenames
   -c, --internal-track-counter
                         Use internal track counter (useful for playlists)
   -a, --add-cover-art   Embed cover art into the recorded files
   --client {spotify,ncspot}
-                        Spotify client to use (default: spotify)
+                        Spotify client to use (default: ncspot)
   --playlist-id PLAYLIST_ID
                         Spotify playlist ID to record
+  --format {flac,mp3,ogg,m4a}
+                        Output audio format (default: flac)
+  --quality QUALITY     Audio quality for lossy formats
+                        MP3/M4A: bitrate in kbps (128, 192, 256, 320)
+                        OGG: quality level 0-10 (10 is best)
+                        Default: 320
 ```
 
+## Examples
 
+### Example 1: High-Quality Playlist Recording
 
-### Example
-
-First of all run spotify (or ncspot).
-
-Then you can run the python script which will record the music:
-
-```
-./spotrec.py -o ./my_song_dir --skip-intro
+```bash
+# Record entire playlist in FLAC
+python3 spotrec.py --playlist-id 37i9dQZF1DXcBWIGoYBM5M -a -c
 ```
 
-For ncspot:
+### Example 2: MP3 Recording for Portable Device
 
-```
-./spotrec.py --client ncspot -o ./my_song_dir --skip-intro
+```bash
+# Record in MP3 at 320kbps with cover art
+python3 spotrec.py --format mp3 --quality 320 -a -o ~/Music/Portable
 ```
 
-Check the  pulseaudio configuration:
+### Example 3: Organized File Structure
+
+```bash
+# Save with artist/album folder structure
+python3 spotrec.py -p "{artist}/{album}/{trackNumber} - {title}" -a
+```
+
+### Example 4: Using Official Spotify Client
+
+```bash
+# Use official client instead of ncspot
+python3 spotrec.py --client spotify -o ~/Music/Recordings
+```
+
+## Audio Quality Settings
+
+### Spotify/ncspot Streaming Quality
+
+The `configure-ncspot.sh` script sets ncspot to stream at **320 kbps** (highest quality available from Spotify). This is the source quality that SpotRec records from.
+
+### Recording Quality
+
+- **FLAC (default)**: Lossless recording - captures the full 320kbps stream without quality loss
+- **MP3**: Lossy format - recommended quality: 320kbps for near-transparent quality
+- **OGG Vorbis**: Lossy format - recommended quality: 8-10 for high quality
+- **M4A (AAC)**: Lossy format - recommended quality: 256-320kbps
+
+**Recommendation**: Use FLAC for archival/maximum quality, then convert to lossy formats as needed.
+
+## PulseAudio Configuration
 
 ```
 pavucontrol
@@ -128,18 +248,39 @@ Finally start playing whatever you want
 
 ## Hints
 
-- Disable volume normalization in the Spotify Client (or in ncspot's config)
+- **ncspot is now the default client** - just run `python3 spotrec.py`
 
-- Do not change the volume during recording
+- **Use the configuration script**: Run `./configure-ncspot.sh` for automatic setup
 
-- For ncspot users: The `configure-ncspot.sh` script sets optimal recording settings including:
-  - 320 kbps bitrate for best quality
-  - Disabled volume normalization
-  - PulseAudio backend compatibility
+- **Audio quality**: ncspot is configured for 320kbps streaming (highest Spotify quality)
 
-- Use Audacity for post processing
+- **Disable volume normalization** in the Spotify Client or ncspot config (done automatically by configure-ncspot.sh)
 
-  * because SpotRec records a little longer at the end to ensure that nothing is missing of the song. But sometimes this also includes the beginning of the next song. So you should use Audacity to cut the audio to what you want. From Audacity you can also export it to the format you like (ogg/mp3/...).
+- **Do not change the volume** during recording for consistent quality
+
+- **Output formats**: 
+  - FLAC (default): Lossless, best quality, larger files
+  - MP3: Universal compatibility, 320kbps recommended
+  - OGG: Good quality/size ratio, quality 8-10 recommended
+  - M4A: Apple ecosystem, 256-320kbps recommended
+
+- **Playlist recording**: Use `--playlist-id` with `-c` (internal counter) to preserve track order
+
+- **Cover art**: Use `-a` flag to embed album artwork into files
+
+- **Post-processing**: Use Audacity to trim recordings if needed (SpotRec records slightly longer to ensure nothing is missed)
+
+## ncspot Configuration
+
+The `configure-ncspot.sh` script automatically configures ncspot with optimal settings:
+
+- **Bitrate**: 320 kbps (highest quality)
+- **Volume normalization**: Disabled (for consistent recording levels)
+- **Backend**: PulseAudio (required for SpotRec)
+- **Gapless playback**: Enabled
+- **Audio caching**: Enabled (1GB cache)
+
+Configuration file location: `~/.config/ncspot/config.toml`
 
 
 ## Troubleshooting
