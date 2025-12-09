@@ -584,7 +584,7 @@ class FFmpeg:
             self.process = Shell.Popen(_ffmpeg_executable + ' -hide_banner -y '
                                        f'-f {self.input_format} ' +
                                        '-ac 2 -ar 44100 ' +
-                                       '-i ":' + self.audio_input + '" ' + metadata_params + ' ' +
+                                       '-i ":' + shlex.quote(self.audio_input) + '" ' + metadata_params + ' ' +
                                        codec_params +
                                        ' ' + shlex.quote(os.path.join(self.out_dir, self.filename)))
         else:
@@ -592,7 +592,7 @@ class FFmpeg:
             self.process = Shell.Popen(_ffmpeg_executable + ' -hide_banner -y '
                                        f'-f {self.input_format} ' +
                                        '-ac 2 -ar 44100 -fragment_size 8820 ' +
-                                       '-i ' + self.audio_input + metadata_params + ' ' +
+                                       '-i ' + shlex.quote(self.audio_input) + metadata_params + ' ' +
                                        codec_params +
                                        ' ' + shlex.quote(os.path.join(self.out_dir, self.filename)))
 
