@@ -589,12 +589,6 @@ class FFmpeg:
             # Default to FLAC
             return "-acodec flac"
 
-        self.pid = str(self.process.pid)
-
-        self.instances.append(self)
-
-        log.info(f"[FFmpeg] [{self.pid}] Recording started")
-
     # The blocking version of this method waits until the process is dead
     def stop_blocking(self):
         # Remove from instances list (and terminate)
@@ -728,8 +722,7 @@ class Shell:
         if _debug_logging:
             return subprocess.run(cmd.encode(_shell_encoding), stdin=None, shell=True, executable=_shell_executable, encoding=_shell_encoding)
         else:
-            with open("/dev/null", "w") as devnull:
-                return subprocess.run(cmd.encode(_shell_encoding), stdin=None, stdout=devnull, stderr=devnull, shell=True, executable=_shell_executable, encoding=_shell_encoding)
+            return subprocess.run(cmd.encode(_shell_encoding), stdin=None, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, shell=True, executable=_shell_executable, encoding=_shell_encoding)
 
     @staticmethod
     def Popen(cmd):
@@ -738,8 +731,7 @@ class Shell:
         if _debug_logging:
             return subprocess.Popen(cmd.encode(_shell_encoding), stdin=None, shell=True, executable=_shell_executable, encoding=_shell_encoding)
         else:
-            with open("/dev/null", "w") as devnull:
-                return subprocess.Popen(cmd.encode(_shell_encoding), stdin=None, stdout=devnull, stderr=devnull, shell=True, executable=_shell_executable, encoding=_shell_encoding)
+            return subprocess.Popen(cmd.encode(_shell_encoding), stdin=None, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, shell=True, executable=_shell_executable, encoding=_shell_encoding)
 
     @staticmethod
     def check_output(cmd):
