@@ -581,10 +581,11 @@ class FFmpeg:
         #  "-ar 44100": always use 44.1k samplerate (same as Spotify)
         if _is_macos:
             # macOS doesn't use fragment_size
+            # avfoundation format uses ':device_name' syntax
             self.process = Shell.Popen(_ffmpeg_executable + ' -hide_banner -y '
                                        f'-f {self.input_format} ' +
                                        '-ac 2 -ar 44100 ' +
-                                       '-i ":' + shlex.quote(self.audio_input) + '" ' + metadata_params + ' ' +
+                                       f'-i ":{self.audio_input}" ' + metadata_params + ' ' +
                                        codec_params +
                                        ' ' + shlex.quote(os.path.join(self.out_dir, self.filename)))
         else:

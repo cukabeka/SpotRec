@@ -35,6 +35,11 @@ if [ -f "$CONFIG_FILE" ]; then
         echo "Error: Failed to create backup. Aborting to prevent data loss."
         exit 1
     fi
+    # Verify backup was created successfully
+    if [ ! -f "$CONFIG_FILE.bak" ] || [ ! -r "$CONFIG_FILE.bak" ]; then
+        echo "Error: Backup file is not readable. Aborting to prevent data loss."
+        exit 1
+    fi
     echo "✓ Backup created successfully"
 fi
 
