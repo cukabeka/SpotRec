@@ -31,7 +31,11 @@ mkdir -p "$CONFIG_DIR"
 if [ -f "$CONFIG_FILE" ]; then
     echo "Warning: Configuration file already exists"
     echo "Creating backup at $CONFIG_FILE.bak"
-    cp "$CONFIG_FILE" "$CONFIG_FILE.bak"
+    if ! cp "$CONFIG_FILE" "$CONFIG_FILE.bak"; then
+        echo "Error: Failed to create backup. Aborting to prevent data loss."
+        exit 1
+    fi
+    echo "✓ Backup created successfully"
 fi
 
 # Create the configuration file

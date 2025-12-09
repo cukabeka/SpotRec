@@ -21,6 +21,7 @@ import logging
 import shlex
 import requests
 import platform
+from urllib.parse import urlparse, parse_qs
 
 # Deps:
 # 'python'
@@ -208,6 +209,26 @@ def handle_command_line():
     _output_format = args.format
     
     _audio_quality = args.quality
+    
+    # Validate audio quality parameter based on format
+    if _output_format == "ogg":
+        try:
+            quality_val = float(_audio_quality)
+            if quality_val < 0 or quality_val > 10:
+                print("Error: OGG quality must be between 0 and 10")
+                sys.exit(1)
+        except ValueError:
+            print("Error: OGG quality must be a number between 0 and 10")
+            sys.exit(1)
+    elif _output_format in ["mp3", "mp4"]:
+        try:
+            bitrate_val = int(_audio_quality)
+            if bitrate_val < 64 or bitrate_val > 320:
+                print("Error: Bitrate for MP3/MP4 must be between 64 and 320 kbps")
+                sys.exit(1)
+        except ValueError:
+            print("Error: Bitrate for MP3/MP4 must be a number")
+            sys.exit(1)
 
 
 def init_log():
@@ -296,16 +317,25 @@ class Spotify:
         """Load a Spotify playlist by ID or URL"""
         # Extract playlist ID from URL if necessary
         playlist_id = playlist_input
-        if "open.spotify.com/playlist/" in playlist_input:
-            # Extract ID from URL
-            playlist_id = playlist_input.split("playlist/")[1].split("?")[0]
+        if "open.spotify.com/playlist/" in playlist_input or "spotify.com/playlist/" in playlist_input:
+            # Parse URL properly to extract ID
+            try:
+                parsed_url = urlparse(playlist_input)
+                path_parts = parsed_url.path.split('/')
+                if 'playlist' in path_parts:
+                    playlist_idx = path_parts.index('playlist')
+                    if playlist_idx + 1 < len(path_parts):
+                        playlist_id = path_parts[playlist_idx + 1]
+            except Exception as e:
+                log.warning(f"[{app_name}] Could not parse playlist URL: {e}")
+                return
         
         log.info(f"[{app_name}] Loading playlist: {playlist_id}")
         
-        # Use D-Bus to open the playlist URI
+        # Use D-Bus to open the playlist URI (properly escaped)
         playlist_uri = f"spotify:playlist:{playlist_id}"
         try:
-            Shell.run(f'dbus-send --print-reply --dest={self.dbus_dest} {self.dbus_path} org.mpris.MediaPlayer2.Player.OpenUri string:"{playlist_uri}"')
+            Shell.run(f'dbus-send --print-reply --dest={shlex.quote(self.dbus_dest)} {shlex.quote(self.dbus_path)} org.mpris.MediaPlayer2.Player.OpenUri string:{shlex.quote(playlist_uri)}')
             # Wait a bit for the playlist to load
             time.sleep(2)
             log.info(f"[{app_name}] Playlist loaded, starting playback")
@@ -820,7 +850,7 @@ class PulseAudio:
             set_blackhole_thread.start()
             return
         
-        class MoveSpotifyToSinktThread(Thread):
+        class MoveSpotifyToSinkThread(Thread):
             def run(self):
                 if pa_spotify_sink_input_id > -1:
                     exit_code = Shell.run("pactl move-sink-input " + str(
@@ -832,7 +862,7 @@ class PulseAudio:
                         log.warning(
                             f"[{app_name}] Failed to move Spotify to own sink")
 
-        move_spotify_to_sink_thread = MoveSpotifyToSinktThread()
+        move_spotify_to_sink_thread = MoveSpotifyToSinkThread()
         move_spotify_to_sink_thread.start()
 
     @staticmethod
