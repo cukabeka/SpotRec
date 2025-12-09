@@ -20,13 +20,17 @@ import traceback
 import logging
 import shlex
 import requests
+import platform
+from urllib.parse import urlparse, parse_qs
 
 # Deps:
 # 'python'
 # 'python-dbus'
 # 'ffmpeg'
-# 'gawk': awk in command to get sink input id of spotify
-# 'pulseaudio': sink control stuff
+# Linux: 'gawk': awk in command to get sink input id of spotify
+# Linux: 'pulseaudio': sink control stuff
+# macOS: 'BlackHole': virtual audio device (https://existential.audio/blackhole/)
+# macOS: 'SwitchAudioSource': command-line audio device switcher
 # 'bash': shell commands
 # 'requests': get album art
 
@@ -34,7 +38,7 @@ import requests
 # - set fixed latency on pipewire (currently only done by ffmpeg while it is recording ("fragment_size" parameter), but should ideally be set before recording)
 
 app_name = "SpotRec"
-app_version = "0.15.1"
+app_version = "0.16.0"
 
 # Settings with Defaults
 _debug_logging = False
@@ -45,9 +49,15 @@ _filename_pattern = "{trackNumber} - {artist} - {title}"
 _underscored_filenames = False
 _use_internal_track_counter = False
 _add_cover_art = False
+_client_type = "spotify"  # "spotify" or "ncspot"
+_playlist_id = None
+_output_format = "flac"  # flac, ogg, mp3, mp4
+_audio_quality = "320"  # bitrate for lossy formats
+_is_macos = platform.system() == "Darwin"
 
 # Hard-coded settings
 _pa_recording_sink_name = "spotrec"
+_blackhole_device_name = "BlackHole 2ch"  # macOS virtual audio device
 _pa_max_volume = "65536"
 _recording_time_before_song = 0.25
 _recording_time_after_song = 1.25
@@ -131,6 +141,10 @@ def handle_command_line():
     global _underscored_filenames
     global _use_internal_track_counter
     global _add_cover_art
+    global _client_type
+    global _playlist_id
+    global _output_format
+    global _audio_quality
 
     parser = argparse.ArgumentParser(
         description=app_name + " v" + app_version, formatter_class=argparse.RawTextHelpFormatter)
@@ -138,7 +152,7 @@ def handle_command_line():
                         action="store_true", default=_debug_logging)
     parser.add_argument("-s", "--skip-intro", help="Skip the intro message",
                         action="store_true", default=_skip_intro)
-    parser.add_argument("-m", "--mute-recording", help="Mute Spotify on your main output device while recording",
+    parser.add_argument("-m", "--mute-recording", help="Mute Spotify on your main output device while recording (Linux only)",
                         action="store_true", default=_mute_pa_recording_sink)
     parser.add_argument("-o", "--output-directory", help="Where to save the recordings\n"
                                                          "Default: " + _output_directory, default=_output_directory)
@@ -153,6 +167,22 @@ def handle_command_line():
                         action="store_true", default=_use_internal_track_counter)
     parser.add_argument("-a", "--add-cover-art", help="Embed the cover art from Spotify into the file",
                         action="store_true", default=_add_cover_art)
+    parser.add_argument("--client", help="Spotify client type: 'spotify' (default) or 'ncspot'\n"
+                                         "Default: " + _client_type, 
+                        choices=["spotify", "ncspot"], default=_client_type)
+    parser.add_argument("--playlist-id", help="Spotify playlist ID or URL to automatically record.\n"
+                                              "Example: 37i9dQZF1DXcBWIGoYBM5M or\n"
+                                              "https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M",
+                        default=_playlist_id)
+    parser.add_argument("-f", "--format", help="Output audio format\n"
+                                               "Choices: flac, ogg, mp3, mp4\n"
+                                               "Default: flac",
+                        choices=["flac", "ogg", "mp3", "mp4"], default=_output_format)
+    parser.add_argument("-q", "--quality", help="Audio quality/bitrate for lossy formats (mp3, ogg, mp4)\n"
+                                                "For mp3/mp4: bitrate in kbps (e.g., 128, 192, 256, 320)\n"
+                                                "For ogg: quality level 0-10 (e.g., 6, 8, 10)\n"
+                                                "Default: 320",
+                        default=_audio_quality)
 
     args = parser.parse_args()
 
@@ -171,6 +201,34 @@ def handle_command_line():
     _use_internal_track_counter = args.internal_track_counter
 
     _add_cover_art = args.add_cover_art
+    
+    _client_type = args.client
+    
+    _playlist_id = args.playlist_id
+    
+    _output_format = args.format
+    
+    _audio_quality = args.quality
+    
+    # Validate audio quality parameter based on format
+    if _output_format == "ogg":
+        try:
+            quality_val = float(_audio_quality)
+            if quality_val < 0 or quality_val > 10:
+                print("Error: OGG quality must be between 0 and 10")
+                sys.exit(1)
+        except ValueError:
+            print("Error: OGG quality must be a number between 0 and 10")
+            sys.exit(1)
+    elif _output_format in ["mp3", "mp4"]:
+        try:
+            bitrate_val = int(_audio_quality)
+            if bitrate_val < 64 or bitrate_val > 320:
+                print("Error: Bitrate for MP3/MP4 must be between 64 and 320 kbps")
+                sys.exit(1)
+        except ValueError:
+            print("Error: Bitrate for MP3/MP4 must be a number")
+            sys.exit(1)
 
 
 def init_log():
@@ -190,17 +248,24 @@ def init_log():
 
 
 class Spotify:
-    dbus_dest = "org.mpris.MediaPlayer2.spotify"
-    dbus_path = "/org/mpris/MediaPlayer2"
-    mpris_player_string = "org.mpris.MediaPlayer2.Player"
-
     def __init__(self):
         self.glibloop = None
+        
+        # Set D-Bus destination based on client type
+        if _client_type == "ncspot":
+            self.dbus_dest = "org.mpris.MediaPlayer2.ncspot"
+            self.application_name = "ncspot"
+        else:
+            self.dbus_dest = "org.mpris.MediaPlayer2.spotify"
+            self.application_name = "spotify"
+        
+        self.dbus_path = "/org/mpris/MediaPlayer2"
+        self.mpris_player_string = "org.mpris.MediaPlayer2.Player"
 
         dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
 
         try:
-            # Connect to Spotify client dbus interface
+            # Connect to Spotify/ncspot client dbus interface
             bus = dbus.SessionBus()
             player = bus.get_object(self.dbus_dest, self.dbus_path)
             self.iface = dbus.Interface(
@@ -211,9 +276,13 @@ class Spotify:
             self.update_metadata()
         except DBusException:
             log.error(
-                f"Error: Could not connect to the Spotify Client. It has to be running first before starting {app_name}.")
+                f"Error: Could not connect to the {_client_type} Client. It has to be running first before starting {app_name}.")
             sys.exit(1)
             pass
+        
+        # If playlist ID is provided, load and start playing it
+        if _playlist_id:
+            self.load_playlist(_playlist_id)
 
         self.track = self.get_track()
         self.trackid = self.metadata.get(dbus.String(u'mpris:trackid'))
@@ -239,10 +308,39 @@ class Spotify:
         dbuslistener = DBusListenerThread(self)
         dbuslistener.start()
 
-        log.info(f"[{app_name}] Spotify DBus listener started")
+        log.info(f"[{app_name}] {_client_type} DBus listener started")
 
         log.info(f"[{app_name}] Current song: {self.track}")
         log.info(f"[{app_name}] Current state: " + self.playbackstatus)
+    
+    def load_playlist(self, playlist_input):
+        """Load a Spotify playlist by ID or URL"""
+        # Extract playlist ID from URL if necessary
+        playlist_id = playlist_input
+        if "open.spotify.com/playlist/" in playlist_input or "spotify.com/playlist/" in playlist_input:
+            # Parse URL properly to extract ID
+            try:
+                parsed_url = urlparse(playlist_input)
+                path_parts = parsed_url.path.split('/')
+                if 'playlist' in path_parts:
+                    playlist_idx = path_parts.index('playlist')
+                    if playlist_idx + 1 < len(path_parts):
+                        playlist_id = path_parts[playlist_idx + 1]
+            except Exception as e:
+                log.warning(f"[{app_name}] Could not parse playlist URL: {e}")
+                return
+        
+        log.info(f"[{app_name}] Loading playlist: {playlist_id}")
+        
+        # Use D-Bus to open the playlist URI (properly escaped)
+        playlist_uri = f"spotify:playlist:{playlist_id}"
+        try:
+            Shell.run(f'dbus-send --print-reply --dest={shlex.quote(self.dbus_dest)} {shlex.quote(self.dbus_path)} org.mpris.MediaPlayer2.Player.OpenUri string:{shlex.quote(playlist_uri)}')
+            # Wait a bit for the playlist to load
+            time.sleep(2)
+            log.info(f"[{app_name}] Playlist loaded, starting playback")
+        except Exception as e:
+            log.warning(f"[{app_name}] Could not load playlist: {e}")
 
     # TODO: this is a dirty solution (uses cmdline instead of python for now)
     def send_dbus_cmd(self, cmd):
@@ -451,12 +549,20 @@ class FFmpeg:
     def record(self, out_dir: str, file: str, metadata_for_file={}):
         self.out_dir = out_dir
 
-        self.pulse_input = _pa_recording_sink_name + ".monitor"
+        # Determine audio input based on platform
+        if _is_macos:
+            # macOS uses BlackHole virtual audio device
+            self.audio_input = _blackhole_device_name
+            self.input_format = 'avfoundation'
+        else:
+            # Linux uses PulseAudio
+            self.audio_input = _pa_recording_sink_name + ".monitor"
+            self.input_format = 'pulse'
 
         # Use a dot as filename prefix to hide the file until the recording was successful
         self.tmp_file_prefix = "."
         self.filename = self.tmp_file_prefix + \
-            os.path.basename(file) + ".flac"
+            os.path.basename(file) + "." + _output_format
 
         # save this to self because metadata_params is discarded after this function
         self.cover_url = metadata_for_file.pop('cover_url')
@@ -465,25 +571,56 @@ class FFmpeg:
         for key, value in metadata_for_file.items():
             metadata_params += ' -metadata ' + key + '=' + shlex.quote(value)
 
+        # FFmpeg encoding options based on format
+        codec_params = self._get_codec_params()
+
         # FFmpeg Options:
         #  "-hide_banner": short the debug log a little
         #  "-y": overwrite existing files
         #  "-ac 2": always use 2 audio channels (stereo) (same as Spotify)
         #  "-ar 44100": always use 44.1k samplerate (same as Spotify)
-        #  "-fragment_size 8820": set recording latency to 50 ms (0.05*44100*2*2) (very high values can cause ffmpeg to not stop fast enough, so post-processing fails)
-        #  "-acodec flac": use the flac lossless audio codec, so we don't lose quality while recording
-        self.process = Shell.Popen(_ffmpeg_executable + ' -hide_banner -y '
-                                   '-f pulse ' +
-                                   '-ac 2 -ar 44100 -fragment_size 8820 ' +
-                                   '-i ' + self.pulse_input + metadata_params + ' '
-                                   '-acodec flac' +
-                                   ' ' + shlex.quote(os.path.join(self.out_dir, self.filename)))
+        if _is_macos:
+            # macOS doesn't use fragment_size
+            # avfoundation format uses ':device_name' syntax
+            # Device name comes from hardcoded constant but escape for robustness
+            escaped_device = shlex.quote(self.audio_input)
+            self.process = Shell.Popen(_ffmpeg_executable + ' -hide_banner -y '
+                                       f'-f {self.input_format} ' +
+                                       '-ac 2 -ar 44100 ' +
+                                       f'-i ":{escaped_device}" ' + metadata_params + ' ' +
+                                       codec_params +
+                                       ' ' + shlex.quote(os.path.join(self.out_dir, self.filename)))
+        else:
+            #  "-fragment_size 8820": set recording latency to 50 ms (0.05*44100*2*2) (very high values can cause ffmpeg to not stop fast enough, so post-processing fails)
+            self.process = Shell.Popen(_ffmpeg_executable + ' -hide_banner -y '
+                                       f'-f {self.input_format} ' +
+                                       '-ac 2 -ar 44100 -fragment_size 8820 ' +
+                                       '-i ' + shlex.quote(self.audio_input) + metadata_params + ' ' +
+                                       codec_params +
+                                       ' ' + shlex.quote(os.path.join(self.out_dir, self.filename)))
 
         self.pid = str(self.process.pid)
 
         self.instances.append(self)
 
         log.info(f"[FFmpeg] [{self.pid}] Recording started")
+    
+    def _get_codec_params(self):
+        """Get FFmpeg codec parameters based on output format and quality"""
+        if _output_format == "flac":
+            return "-acodec flac"
+        elif _output_format == "ogg":
+            # For ogg, quality is 0-10 scale
+            return f"-acodec libvorbis -qscale:a {_audio_quality}"
+        elif _output_format == "mp3":
+            # For mp3, bitrate in kbps
+            return f"-acodec libmp3lame -b:a {_audio_quality}k"
+        elif _output_format == "mp4":
+            # For mp4/m4a with AAC codec
+            return f"-acodec aac -b:a {_audio_quality}k"
+        else:
+            # Default to FLAC
+            return "-acodec flac"
 
     # The blocking version of this method waits until the process is dead
     def stop_blocking(self):
@@ -560,9 +697,9 @@ class FFmpeg:
         # save the image locally -> could use a temp file here
         #   but might add option to keep image later
         cover_file = fullfilepath.rsplit(
-            '.flac', 1)[0]  # remove the extension
+            f'.{_output_format}', 1)[0]  # remove the extension
         log.debug(f'Saving cover art to {cover_file} + image_ext')
-        temp_file = cover_file + '_withArtwork.' + 'flac'
+        temp_file = cover_file + '_withArtwork.' + _output_format
         if self.cover_url.startswith('file://'):
             log.debug(f'[FFmpeg] Cover art is local for {fullfilepath}')
             path = self.cover_url[len('file://'):]
@@ -618,8 +755,7 @@ class Shell:
         if _debug_logging:
             return subprocess.run(cmd.encode(_shell_encoding), stdin=None, shell=True, executable=_shell_executable, encoding=_shell_encoding)
         else:
-            with open("/dev/null", "w") as devnull:
-                return subprocess.run(cmd.encode(_shell_encoding), stdin=None, stdout=devnull, stderr=devnull, shell=True, executable=_shell_executable, encoding=_shell_encoding)
+            return subprocess.run(cmd.encode(_shell_encoding), stdin=None, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, shell=True, executable=_shell_executable, encoding=_shell_encoding)
 
     @staticmethod
     def Popen(cmd):
@@ -628,8 +764,7 @@ class Shell:
         if _debug_logging:
             return subprocess.Popen(cmd.encode(_shell_encoding), stdin=None, shell=True, executable=_shell_executable, encoding=_shell_encoding)
         else:
-            with open("/dev/null", "w") as devnull:
-                return subprocess.Popen(cmd.encode(_shell_encoding), stdin=None, stdout=devnull, stderr=devnull, shell=True, executable=_shell_executable, encoding=_shell_encoding)
+            return subprocess.Popen(cmd.encode(_shell_encoding), stdin=None, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, shell=True, executable=_shell_executable, encoding=_shell_encoding)
 
     @staticmethod
     def check_output(cmd):
@@ -647,6 +782,12 @@ class PulseAudio:
 
     @staticmethod
     def load_sink():
+        if _is_macos:
+            log.info(f"[{app_name}] macOS detected - assuming BlackHole is installed")
+            # On macOS, BlackHole should already be installed and configured
+            # No need to create a virtual sink like on Linux
+            return
+        
         log.info(f"[{app_name}] Creating pulse sink")
 
         if _mute_pa_recording_sink:
@@ -660,17 +801,26 @@ class PulseAudio:
 
     @staticmethod
     def unload_sink():
+        if _is_macos:
+            log.info(f"[{app_name}] macOS - no sink to unload")
+            return
+        
         log.info(f"[{app_name}] Unloading pulse sink")
         Shell.run('pactl unload-module ' + PulseAudio.sink_id)
 
     @staticmethod
     def init_spotify_sink_input_id():
+        if _is_macos:
+            # macOS doesn't need to find sink input ID
+            return
+        
         global pa_spotify_sink_input_id
 
         if pa_spotify_sink_input_id > -1:
             return
 
-        application_name = "spotify"
+        # Use the application name based on client type
+        application_name = _spotify.application_name
         cmdout = Shell.check_output(
             "pactl list sink-inputs | awk '{print tolower($0)};' | awk '/ #/ {print $0} /application.name = \"" + application_name + "\"/ {print $3};'")
         index = -1
@@ -689,7 +839,21 @@ class PulseAudio:
 
     @staticmethod
     def move_spotify_to_own_sink():
-        class MoveSpotifyToSinktThread(Thread):
+        if _is_macos:
+            # macOS: use SwitchAudioSource to route audio to BlackHole
+            class SetBlackHoleThread(Thread):
+                def run(self):
+                    # Try to set the audio output to BlackHole for the application
+                    # Note: This requires the user to manually configure their audio routing
+                    # or use tools like BlackHole + Multi-Output Device
+                    log.info(f"[{app_name}] macOS: Please ensure {_client_type} is routed to BlackHole")
+                    log.info(f"[{app_name}] You can use Audio MIDI Setup to create a Multi-Output Device")
+            
+            set_blackhole_thread = SetBlackHoleThread()
+            set_blackhole_thread.start()
+            return
+        
+        class MoveSpotifyToSinkThread(Thread):
             def run(self):
                 if pa_spotify_sink_input_id > -1:
                     exit_code = Shell.run("pactl move-sink-input " + str(
@@ -701,11 +865,16 @@ class PulseAudio:
                         log.warning(
                             f"[{app_name}] Failed to move Spotify to own sink")
 
-        move_spotify_to_sink_thread = MoveSpotifyToSinktThread()
+        move_spotify_to_sink_thread = MoveSpotifyToSinkThread()
         move_spotify_to_sink_thread.start()
 
     @staticmethod
     def set_sink_volumes_to_100():
+        if _is_macos:
+            # macOS volume control is handled differently
+            log.debug(f"[{app_name}] macOS: Volume control not implemented")
+            return
+        
         log.debug(f"[{app_name}] Set sink volumes to 100%")
 
         # Set Spotify volume to 100%
