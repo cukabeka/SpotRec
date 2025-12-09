@@ -582,10 +582,12 @@ class FFmpeg:
         if _is_macos:
             # macOS doesn't use fragment_size
             # avfoundation format uses ':device_name' syntax
+            # Device name comes from hardcoded constant but escape for robustness
+            escaped_device = shlex.quote(self.audio_input)
             self.process = Shell.Popen(_ffmpeg_executable + ' -hide_banner -y '
                                        f'-f {self.input_format} ' +
                                        '-ac 2 -ar 44100 ' +
-                                       f'-i ":{self.audio_input}" ' + metadata_params + ' ' +
+                                       f'-i ":{escaped_device}" ' + metadata_params + ' ' +
                                        codec_params +
                                        ' ' + shlex.quote(os.path.join(self.out_dir, self.filename)))
         else:
