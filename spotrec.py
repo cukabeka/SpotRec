@@ -2,11 +2,19 @@
 
 # License: https://raw.githubusercontent.com/Bleuzen/SpotRec/master/LICENSE
 
-import dbus
-from dbus.exceptions import DBusException
-import dbus.mainloop.glib
-from gi.repository import GLib
+import json
+import tempfile
 from pathlib import Path
+
+# Conditional DBus imports
+try:
+    import dbus
+    from dbus.exceptions import DBusException
+    import dbus.mainloop.glib
+    from gi.repository import GLib
+    DBUS_AVAILABLE = True
+except ImportError:
+    DBUS_AVAILABLE = False
 
 from threading import Thread
 import subprocess
@@ -25,7 +33,6 @@ from urllib.parse import urlparse, parse_qs
 
 # Deps:
 # 'python'
-# 'python-dbus'
 # 'ffmpeg'
 # Linux: 'gawk': awk in command to get sink input id of spotify
 # Linux: 'pulseaudio': sink control stuff
@@ -33,12 +40,14 @@ from urllib.parse import urlparse, parse_qs
 # macOS: 'SwitchAudioSource': command-line audio device switcher
 # 'bash': shell commands
 # 'requests': get album art
+# For DBus functionality (Linux, or macOS with official client): 'python-dbus', 'pygobject'
+
 
 # TODO:
 # - set fixed latency on pipewire (currently only done by ffmpeg while it is recording ("fragment_size" parameter), but should ideally be set before recording)
 
 app_name = "SpotRec"
-app_version = "0.16.0"
+app_version = "0.17.0" # Version bump for new feature
 
 # Settings with Defaults
 _debug_logging = False
@@ -61,10 +70,11 @@ _blackhole_device_name = "BlackHole 2ch"  # macOS virtual audio device
 _pa_max_volume = "65536"
 _recording_time_before_song = 0.25
 _recording_time_after_song = 1.25
-_playback_time_before_seeking_to_beginning = 5.0
 _shell_executable = "/bin/bash"  # Default: "/bin/sh"
 _shell_encoding = "utf-8"
 _ffmpeg_executable = "ffmpeg"  # Example: "/usr/bin/ffmpeg"
+_METADATA_FILE = os.path.join(tempfile.gettempdir(), 'spotrec_metadata.json')
+
 
 # Variables that change during runtime
 is_script_paused = False
@@ -72,6 +82,7 @@ is_first_playing = True
 pa_spotify_sink_input_id = -1
 internal_track_counter = 1
 is_shutting_down = False
+_player_provider = None
 
 
 def main():
@@ -96,17 +107,27 @@ def main():
     Path(_output_directory).mkdir(
         parents=True, exist_ok=True)
 
-    # Init Spotify DBus listener
-    global _spotify
-    _spotify = Spotify()
+    # Choose the correct metadata provider
+    global _player_provider
+    if _is_macos and _client_type == 'ncspot':
+        log.info(f"[{app_name}] Using ncspot Hook Provider for macOS")
+        _player_provider = NcspotHookProvider()
+    else:
+        if not DBUS_AVAILABLE:
+            log.error("D-Bus Python libraries are not installed. Please install 'dbus-python' and 'PyGObject'.")
+            sys.exit(1)
+        log.info(f"[{app_name}] Using D-Bus Provider")
+        _player_provider = DBusProvider()
+    
+    _player_provider.start()
+
 
     # Load PulseAudio sink
     PulseAudio.load_sink()
-
-    _spotify.init_pa_stuff_if_needed()
+    _player_provider.init_pa_stuff_if_needed()
 
     # Keep the main thread alive (to be able to handle KeyboardInterrupt)
-    while True:
+    while not is_shutting_down:
         time.sleep(1)
 
 
@@ -115,9 +136,9 @@ def doExit():
 
     global is_shutting_down
     is_shutting_down = True
-
-    # Stop Spotify DBus listener
-    _spotify.quit_glib_loop()
+    
+    if _player_provider:
+        _player_provider.stop()
 
     # Kill all FFmpeg subprocesses
     FFmpeg.killAll()
@@ -126,28 +147,17 @@ def doExit():
     PulseAudio.unload_sink()
 
     log.info(f"[{app_name}] Bye")
-
-    # Have to use os exit here, because otherwise GLib would print a strange error message
     os._exit(0)
-    # sys.exit(0)
 
 
 def handle_command_line():
-    global _debug_logging
-    global _skip_intro
-    global _mute_pa_recording_sink
-    global _output_directory
-    global _filename_pattern
-    global _underscored_filenames
-    global _use_internal_track_counter
-    global _add_cover_art
-    global _client_type
-    global _playlist_id
-    global _output_format
-    global _audio_quality
+    global _debug_logging, _skip_intro, _mute_pa_recording_sink, _output_directory
+    global _filename_pattern, _underscored_filenames, _use_internal_track_counter
+    global _add_cover_art, _client_type, _playlist_id, _output_format, _audio_quality
 
     parser = argparse.ArgumentParser(
-        description=app_name + " v" + app_version, formatter_class=argparse.RawTextHelpFormatter)
+        description=f"{app_name} v{app_version}", formatter_class=argparse.RawTextHelpFormatter)
+    # ... (rest of argument parsing is unchanged)
     parser.add_argument("-d", "--debug", help="Print a little more",
                         action="store_true", default=_debug_logging)
     parser.add_argument("-s", "--skip-intro", help="Skip the intro message",
@@ -187,30 +197,18 @@ def handle_command_line():
     args = parser.parse_args()
 
     _debug_logging = args.debug
-
     _skip_intro = args.skip_intro
-
     _mute_pa_recording_sink = args.mute_recording
-
     _filename_pattern = args.filename_pattern
-
     _output_directory = args.output_directory
-
     _underscored_filenames = args.underscored_filenames
-
     _use_internal_track_counter = args.internal_track_counter
-
     _add_cover_art = args.add_cover_art
-    
     _client_type = args.client
-    
     _playlist_id = args.playlist_id
-    
     _output_format = args.format
-    
     _audio_quality = args.quality
     
-    # Validate audio quality parameter based on format
     if _output_format == "ogg":
         try:
             quality_val = float(_audio_quality)
@@ -234,135 +232,51 @@ def handle_command_line():
 def init_log():
     global log
     log = logging.getLogger()
-
-    if _debug_logging:
-        FORMAT = '%(asctime)-15s - %(levelname)s - %(message)s'
-        log.setLevel(logging.DEBUG)
-    else:
-        FORMAT = '%(message)s'
-        log.setLevel(logging.INFO)
-
+    FORMAT = '%(asctime)-15s - %(levelname)s - %(message)s' if _debug_logging else '%(message)s'
+    log.setLevel(logging.DEBUG if _debug_logging else logging.INFO)
     logging.basicConfig(format=FORMAT)
-
     log.debug("Logger initialized")
 
-
-class Spotify:
+class BaseProvider:
+    """Base class for metadata providers."""
     def __init__(self):
-        self.glibloop = None
-        
-        # Set D-Bus destination based on client type
-        if _client_type == "ncspot":
-            self.dbus_dest = "org.mpris.MediaPlayer2.ncspot"
-            self.application_name = "ncspot"
-        else:
-            self.dbus_dest = "org.mpris.MediaPlayer2.spotify"
-            self.application_name = "spotify"
-        
-        self.dbus_path = "/org/mpris/MediaPlayer2"
-        self.mpris_player_string = "org.mpris.MediaPlayer2.Player"
-
-        dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
-
-        try:
-            # Connect to Spotify/ncspot client dbus interface
-            bus = dbus.SessionBus()
-            player = bus.get_object(self.dbus_dest, self.dbus_path)
-            self.iface = dbus.Interface(
-                player, "org.freedesktop.DBus.Properties")
-            # Pull the metadata of the current track from Spotify
-            self.pull_metadata()
-            # Update own metadata vars for current track
-            self.update_metadata()
-        except DBusException:
-            log.error(
-                f"Error: Could not connect to the {_client_type} Client. It has to be running first before starting {app_name}.")
-            sys.exit(1)
-            pass
-        
-        # If playlist ID is provided, load and start playing it
-        if _playlist_id:
-            self.load_playlist(_playlist_id)
-
-        self.track = self.get_track()
-        self.trackid = self.metadata.get(dbus.String(u'mpris:trackid'))
-        self.playbackstatus = self.iface.Get(
-            self.mpris_player_string, "PlaybackStatus")
-
-        self.iface.connect_to_signal(
-            "PropertiesChanged", self.on_playing_uri_changed)
-
-        class DBusListenerThread(Thread):
-            def __init__(self, parent, *args):
-                Thread.__init__(self)
-                self.parent = parent
-
-            def run(self):
-                # Run the GLib event loop to process DBus signals as they arrive
-                self.parent.glibloop = GLib.MainLoop()
-                self.parent.glibloop.run()
-
-                # run() blocks this thread. This gets printed after it's dead.
-                log.info(f"[{app_name}] GLib Loop thread killed")
-
-        dbuslistener = DBusListenerThread(self)
-        dbuslistener.start()
-
-        log.info(f"[{app_name}] {_client_type} DBus listener started")
-
-        log.info(f"[{app_name}] Current song: {self.track}")
-        log.info(f"[{app_name}] Current state: " + self.playbackstatus)
+        self.trackid = None
+        self.track = None
+        self.playbackstatus = "Stopped"
+        self.metadata_artist = ""
+        self.metadata_album = ""
+        self.metadata_title = ""
+        self.metadata_trackNumber = ""
+        self.metadata_artUrl = ""
+        self.application_name = _client_type
     
-    def load_playlist(self, playlist_input):
-        """Load a Spotify playlist by ID or URL"""
-        # Extract playlist ID from URL if necessary
-        playlist_id = playlist_input
-        if "open.spotify.com/playlist/" in playlist_input or "spotify.com/playlist/" in playlist_input:
-            # Parse URL properly to extract ID
-            try:
-                parsed_url = urlparse(playlist_input)
-                path_parts = parsed_url.path.split('/')
-                if 'playlist' in path_parts:
-                    playlist_idx = path_parts.index('playlist')
-                    if playlist_idx + 1 < len(path_parts):
-                        playlist_id = path_parts[playlist_idx + 1]
-            except Exception as e:
-                log.warning(f"[{app_name}] Could not parse playlist URL: {e}")
-                return
+    def start(self):
+        raise NotImplementedError
         
-        log.info(f"[{app_name}] Loading playlist: {playlist_id}")
-        
-        # Use D-Bus to open the playlist URI (properly escaped)
-        playlist_uri = f"spotify:playlist:{playlist_id}"
-        try:
-            Shell.run(f'dbus-send --print-reply --dest={shlex.quote(self.dbus_dest)} {shlex.quote(self.dbus_path)} org.mpris.MediaPlayer2.Player.OpenUri string:{shlex.quote(playlist_uri)}')
-            # Wait a bit for the playlist to load
-            time.sleep(2)
-            log.info(f"[{app_name}] Playlist loaded, starting playback")
-        except Exception as e:
-            log.warning(f"[{app_name}] Could not load playlist: {e}")
+    def stop(self):
+        pass # Optional for providers that don't need cleanup
 
-    # TODO: this is a dirty solution (uses cmdline instead of python for now)
-    def send_dbus_cmd(self, cmd):
-        Shell.run('dbus-send --print-reply --dest=' + self.dbus_dest +
-                  ' ' + self.dbus_path + ' ' + self.mpris_player_string + '.' + cmd)
+    def playing_song_changed(self):
+        log.info(f"[{_client_type}] Song changed: {self.track}")
+        self.start_record()
 
-    def quit_glib_loop(self):
-        if self.glibloop is not None:
-            self.glibloop.quit()
-
-        log.info(f"[{app_name}] Spotify DBus listener stopped")
+    def playbackstatus_changed(self):
+        log.info(f"[{_client_type}] State changed: {self.playbackstatus}")
+        self.init_pa_stuff_if_needed()
 
     def get_metadata_for_ffmpeg(self):
         return {
-            "artist": self.metadata_artist,
-            "album": self.metadata_album,
-            "track": self.metadata_trackNumber.lstrip("0"),
-            "title": self.metadata_title,
-            "cover_url": self.metadata_artUrl,
+            "artist": self.metadata_artist or "",
+            "album": self.metadata_album or "",
+            "track": (self.metadata_trackNumber or "1").lstrip("0"),
+            "title": self.metadata_title or "",
+            "cover_url": self.metadata_artUrl or "",
         }
 
     def get_track(self):
+        if not all([self.metadata_artist, self.metadata_album, self.metadata_trackNumber, self.metadata_title]):
+            return "unknown_track"
+
         if _underscored_filenames:
             filename_pattern = re.sub(" - ", "__", _filename_pattern)
         else:
@@ -379,156 +293,22 @@ class Spotify:
             ret = ret.replace(".", "").lower()
             ret = re.sub(r"[\s\-\[\]()']+", "_", ret)
             ret = re.sub("__+", "__", ret)
-
         return ret
 
     def is_playing(self):
-        return self.playbackstatus == "Playing"
+        return self.playbackstatus in ["Playing", "change", "play"]
 
     def start_record(self):
-        # Start new recording in new Thread
-        class RecordThread(Thread):
-            def __init__(self, parent, *args):
-                Thread.__init__(self)
-                self.parent = parent
-
-            def run(self):
-                global is_script_paused
-                global _output_directory
-
-                # Save current trackid to check later if it is still the same song playing (to avoid a bug when user skipped a song)
-                self.trackid_when_thread_started = self.parent.trackid
-
-                # Stop the recording before
-                # Use copy() to not change the list during this method runs
-                self.parent.stop_old_recording(FFmpeg.instances.copy())
-
-                # This is currently the only way to seek to the beginning (let it Play for some seconds, Pause and send Previous)
-                time.sleep(_playback_time_before_seeking_to_beginning)
-
-                # Check if still the same song is still playing, return if not
-                if self.trackid_when_thread_started != self.parent.trackid:
-                    return
-
-                # Spotify pauses when the playlist ended. Don't start a recording / return in this case.
-                if not self.parent.is_playing():
-                    log.info(
-                        f"[{app_name}] Spotify is paused. Maybe the current album or playlist has ended.")
-
-                    # Exit after playlist recorded
-                    if not is_script_paused:
-                        doExit()
-
-                    return
-
-                # Do not record ads
-                if self.parent.trackid.startswith("spotify:ad:"):
-                    log.debug(f"[{app_name}] Skipping ad")
-                    return
-
-                log.info(f"[{app_name}] Starting recording")
-
-                # Set is_script_paused to not trigger wrong Pause event in playbackstatus_changed()
-                is_script_paused = True
-                # Pause until out dir is created
-                self.parent.send_dbus_cmd("Pause")
-
-                # Create output folder if necessary
-                # If filename_pattern specifies subfolder(s) the track name is only the basename while the dirname is the subfolder path
-                self.out_dir = os.path.join(
-                    _output_directory, os.path.dirname(self.parent.track))
-                Path(self.out_dir).mkdir(
-                    parents=True, exist_ok=True)
-
-                # Go to beginning of the song
-                is_script_paused = False
-                self.parent.send_dbus_cmd("Previous")
-
-                # Start FFmpeg recording
-                ff = FFmpeg()
-                ff.record(self.out_dir,
-                          self.parent.track, self.parent.get_metadata_for_ffmpeg())
-
-                # Give FFmpeg some time to start up before starting the song
-                time.sleep(_recording_time_before_song)
-
-                # Play the track
-                self.parent.send_dbus_cmd("Play")
-
-        record_thread = RecordThread(self)
-        record_thread.start()
+        raise NotImplementedError
 
     def stop_old_recording(self, instances):
-        # Stop the oldest FFmpeg instance (from recording of song before) (if one is running)
         if len(instances) > 0:
             class OverheadRecordingStopThread(Thread):
                 def run(self):
-                    # Record a little longer to not miss something
                     time.sleep(_recording_time_after_song)
-
-                    # Stop the recording
                     instances[0].stop_blocking()
-
             overhead_recording_stop_thread = OverheadRecordingStopThread()
             overhead_recording_stop_thread.start()
-
-    # This gets called whenever Spotify sends the playingUriChanged signal
-    def on_playing_uri_changed(self, Player, three, four):
-        # Pull updated metadata from Spotify
-        self.pull_metadata()
-
-        # Update track & trackid
-        new_trackid = self.metadata.get(dbus.String(u'mpris:trackid'))
-        if self.trackid != new_trackid:
-            # Update internal track metadata vars
-            self.update_metadata()
-            # Update trackid
-            self.trackid = new_trackid
-            # Update track name
-            self.track = self.get_track()
-            # Trigger event method
-            self.playing_song_changed()
-            # Update track counter
-            if _use_internal_track_counter:
-                global internal_track_counter
-                internal_track_counter += 1
-
-        # Update playback status
-        new_playbackstatus = self.iface.Get(Player, "PlaybackStatus")
-        if self.playbackstatus != new_playbackstatus:
-            self.playbackstatus = new_playbackstatus
-            self.playbackstatus_changed()
-
-    def playing_song_changed(self):
-        log.info("[Spotify] Song changed: " + self.track)
-
-        self.start_record()
-
-    def playbackstatus_changed(self):
-        log.info("[Spotify] State changed: " + self.playbackstatus)
-
-        self.init_pa_stuff_if_needed()
-
-    def pull_metadata(self):
-        self.metadata = self.iface.Get(self.mpris_player_string, "Metadata")
-
-    def update_metadata(self):
-        self.metadata_artist = ", ".join(
-            self.metadata.get(dbus.String(u'xesam:artist')))
-        self.metadata_album = self.metadata.get(dbus.String(u'xesam:album'))
-        self.metadata_title = self.metadata.get(dbus.String(u'xesam:title'))
-        self.metadata_trackNumber = str(self.metadata.get(
-            dbus.String(u'xesam:trackNumber'))).zfill(2)
-        # https://github.com/patrickziegler/SpotifyRecorder/blob/4c1cc0a5449d0ca8bfb409ef98f4c7a21c73fe0f/spotify_recorder/track.py#L88
-        # https://community.spotify.com/t5/Desktop-Linux/MPRIS-cover-art-url-file-not-found/m-p/4929877/highlight/true#M19504
-        self.metadata_artUrl = str(self.metadata.get(dbus.String(u'mpris:artUrl'))).replace(
-            "https://open.spotify.com/image/",
-            "https://i.scdn.co/image/"
-        )
-
-        if _use_internal_track_counter:
-            global internal_track_counter
-            self.metadata_trackNumber = str(internal_track_counter).zfill(3)
 
     def init_pa_stuff_if_needed(self):
         if self.is_playing():
@@ -536,11 +316,254 @@ class Spotify:
             if is_first_playing:
                 is_first_playing = False
                 log.debug(f"[{app_name}] Initializing PulseAudio stuff")
-
                 PulseAudio.init_spotify_sink_input_id()
                 PulseAudio.set_sink_volumes_to_100()
-
                 PulseAudio.move_spotify_to_own_sink()
+
+class NcspotHookProvider(BaseProvider):
+    """Metadata provider for ncspot on macOS using a file hook."""
+    def __init__(self):
+        super().__init__()
+        self._polling_thread = None
+        self._last_mtime = 0
+        log.info(f"[{app_name}] Waiting for song change from ncspot...")
+        log.info(f"[{app_name}] Make sure you start ncspot with the hook:")
+        log.info(f"ncspot --on-song-change-hook \"{os.path.abspath('ncspot_hook.py')}\"")
+
+
+    def start(self):
+        self._polling_thread = Thread(target=self.poll_file, daemon=True)
+        self._polling_thread.start()
+
+    def stop(self):
+        # The thread is a daemon, so it will exit automatically.
+        pass
+    
+    def poll_file(self):
+        while not is_shutting_down:
+            try:
+                if os.path.exists(_METADATA_FILE):
+                    mtime = os.path.getmtime(_METADATA_FILE)
+                    if mtime > self._last_mtime:
+                        self._last_mtime = mtime
+                        with open(_METADATA_FILE, 'r', encoding='utf-8') as f:
+                            data = json.load(f)
+                        self.process_metadata(data)
+            except (IOError, json.JSONDecodeError):
+                pass # Ignore errors if file is being written or malformed
+            time.sleep(0.5)
+
+    def process_metadata(self, data):
+        new_trackid = data.get('trackid')
+        if not new_trackid:
+            return
+
+        new_playbackstatus = data.get('playbackStatus')
+
+        if self.trackid != new_trackid:
+            self.metadata_artist = data.get('artist', 'Unknown Artist')
+            self.metadata_album = data.get('album', 'Unknown Album')
+            self.metadata_title = data.get('title', 'Unknown Title')
+            self.metadata_trackNumber = str(data.get('trackNumber', '1')).zfill(2)
+            self.metadata_artUrl = data.get('artUrl', '')
+            
+            global internal_track_counter
+            if _use_internal_track_counter:
+                self.metadata_trackNumber = str(internal_track_counter).zfill(3)
+                internal_track_counter += 1
+
+            self.trackid = new_trackid
+            self.track = self.get_track()
+            self.playbackstatus = new_playbackstatus
+            self.playing_song_changed()
+
+        elif self.playbackstatus != new_playbackstatus:
+            self.playbackstatus = new_playbackstatus
+            self.playbackstatus_changed()
+
+    def start_record(self):
+        class RecordThread(Thread):
+            def __init__(self, parent, *args):
+                Thread.__init__(self)
+                self.parent = parent
+
+            def run(self):
+                if not self.parent.is_playing():
+                    log.info(f"[{app_name}] ncspot is not playing. Maybe the current album or playlist has ended.")
+                    return
+
+                if self.parent.trackid and self.parent.trackid.startswith("spotify:ad:"):
+                    log.debug(f"[{app_name}] Skipping ad")
+                    return
+                
+                log.info(f"[{app_name}] Starting recording")
+                
+                self.parent.stop_old_recording(FFmpeg.instances.copy())
+
+                out_dir = os.path.join(_output_directory, os.path.dirname(self.parent.track))
+                Path(out_dir).mkdir(parents=True, exist_ok=True)
+                
+                ff = FFmpeg()
+                ff.record(out_dir, self.parent.track, self.parent.get_metadata_for_ffmpeg())
+
+        record_thread = RecordThread(self)
+        record_thread.start()
+
+class DBusProvider(BaseProvider):
+    """Metadata provider using D-Bus (for Linux or official Spotify client on macOS)."""
+    def __init__(self):
+        super().__init__()
+        self.glibloop = None
+        
+        if _client_type == "ncspot":
+            self.dbus_dest = "org.mpris.MediaPlayer2.ncspot"
+        else:
+            self.dbus_dest = "org.mpris.MediaPlayer2.spotify"
+        
+        self.dbus_path = "/org/mpris/MediaPlayer2"
+        self.mpris_player_string = "org.mpris.MediaPlayer2.Player"
+        dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
+
+        try:
+            bus = dbus.SessionBus()
+            player = bus.get_object(self.dbus_dest, self.dbus_path)
+            self.iface = dbus.Interface(player, "org.freedesktop.DBus.Properties")
+            self.pull_metadata()
+            self.update_metadata()
+        except DBusException as e:
+            log.debug(e)
+            log.error(f"Error: Could not connect to the D-Bus interface for {_client_type}.")
+            if _client_type == 'ncspot':
+                log.error("This can happen if ncspot is not configured correctly.")
+                log.error("Please ensure you have enabled the MPRIS interface in ncspot's config file.")
+                log.error("Run './configure-ncspot.sh' to create a valid configuration, then restart ncspot.")
+            else:
+                log.error(f"Please ensure the {_client_type} client is running.")
+            sys.exit(1)
+        
+        if _playlist_id:
+            self.load_playlist(_playlist_id)
+
+        self.track = self.get_track()
+        self.trackid = self.metadata.get(dbus.String(u'mpris:trackid'))
+        self.playbackstatus = self.iface.Get(self.mpris_player_string, "PlaybackStatus")
+        self.iface.connect_to_signal("PropertiesChanged", self.on_playing_uri_changed)
+
+    def start(self):
+        class DBusListenerThread(Thread):
+            def __init__(self, parent):
+                Thread.__init__(self)
+                self.parent = parent
+            def run(self):
+                self.parent.glibloop = GLib.MainLoop()
+                self.parent.glibloop.run()
+                log.info(f"[{app_name}] GLib Loop thread killed")
+        
+        dbuslistener = DBusListenerThread(self)
+        dbuslistener.start()
+        log.info(f"[{app_name}] {_client_type} D-Bus listener started")
+        log.info(f"[{app_name}] Current song: {self.track}")
+        log.info(f"[{app_name}] Current state: {self.playbackstatus}")
+
+    def stop(self):
+        if self.glibloop is not None:
+            self.glibloop.quit()
+        log.info(f"[{app_name}] D-Bus listener stopped")
+    
+    def load_playlist(self, playlist_input):
+        playlist_id = playlist_input
+        if "open.spotify.com/playlist/" in playlist_input or "spotify.com/playlist/" in playlist_input:
+            try:
+                parsed_url = urlparse(playlist_input)
+                path_parts = parsed_url.path.split('/')
+                if 'playlist' in path_parts:
+                    playlist_id = path_parts[path_parts.index('playlist') + 1]
+            except Exception as e:
+                log.warning(f"[{app_name}] Could not parse playlist URL: {e}")
+                return
+        
+        playlist_uri = f"spotify:playlist:{playlist_id}"
+        log.info(f"[{app_name}] Loading playlist: {playlist_uri}")
+        try:
+            self.send_dbus_cmd(f'OpenUri string:{shlex.quote(playlist_uri)}')
+            time.sleep(2)
+        except Exception as e:
+            log.warning(f"[{app_name}] Could not load playlist: {e}")
+
+    def send_dbus_cmd(self, cmd):
+        Shell.run(f'dbus-send --print-reply --dest={self.dbus_dest} {self.dbus_path} {self.mpris_player_string}.{cmd}')
+
+    def on_playing_uri_changed(self, Player, three, four):
+        self.pull_metadata()
+        new_trackid = self.metadata.get(dbus.String(u'mpris:trackid'))
+        if self.trackid != new_trackid:
+            self.update_metadata()
+            self.trackid = new_trackid
+            self.track = self.get_track()
+            self.playing_song_changed()
+            if _use_internal_track_counter:
+                global internal_track_counter
+                internal_track_counter += 1
+
+        new_playbackstatus = self.iface.Get(Player, "PlaybackStatus")
+        if self.playbackstatus != new_playbackstatus:
+            self.playbackstatus = new_playbackstatus
+            self.playbackstatus_changed()
+
+    def pull_metadata(self):
+        self.metadata = self.iface.Get(self.mpris_player_string, "Metadata")
+
+    def update_metadata(self):
+        self.metadata_artist = ", ".join(self.metadata.get(dbus.String(u'xesam:artist'), ['']))
+        self.metadata_album = self.metadata.get(dbus.String(u'xesam:album'), '')
+        self.metadata_title = self.metadata.get(dbus.String(u'xesam:title'), '')
+        self.metadata_trackNumber = str(self.metadata.get(dbus.String(u'xesam:trackNumber'), '1')).zfill(2)
+        self.metadata_artUrl = str(self.metadata.get(dbus.String(u'mpris:artUrl'), '')).replace("https://open.spotify.com/image/", "https://i.scdn.co/image/")
+        
+        if _use_internal_track_counter:
+            global internal_track_counter
+            self.metadata_trackNumber = str(internal_track_counter).zfill(3)
+    
+    def start_record(self):
+        class RecordThread(Thread):
+            def __init__(self, parent, *args):
+                Thread.__init__(self)
+                self.parent = parent
+            def run(self):
+                global is_script_paused
+                trackid_when_started = self.parent.trackid
+                
+                self.parent.stop_old_recording(FFmpeg.instances.copy())
+                
+                time.sleep(5.0) # _playback_time_before_seeking_to_beginning
+
+                if trackid_when_started != self.parent.trackid: return
+                if not self.parent.is_playing():
+                    log.info(f"[{app_name}] Client is paused. Maybe the playlist ended.")
+                    if not is_script_paused: doExit()
+                    return
+                if self.parent.trackid.startswith("spotify:ad:"):
+                    log.debug(f"[{app_name}] Skipping ad")
+                    return
+
+                log.info(f"[{app_name}] Starting recording")
+                is_script_paused = True
+                self.parent.send_dbus_cmd("Pause")
+                
+                out_dir = os.path.join(_output_directory, os.path.dirname(self.parent.track))
+                Path(out_dir).mkdir(parents=True, exist_ok=True)
+                
+                is_script_paused = False
+                self.parent.send_dbus_cmd("Previous")
+                
+                ff = FFmpeg()
+                ff.record(out_dir, self.parent.track, self.parent.get_metadata_for_ffmpeg())
+                
+                time.sleep(_recording_time_before_song)
+                self.parent.send_dbus_cmd("Play")
+
+        record_thread = RecordThread(self)
+        record_thread.start()
 
 
 class FFmpeg:
@@ -569,7 +592,7 @@ class FFmpeg:
         # build metadata param
         metadata_params = ''
         for key, value in metadata_for_file.items():
-            metadata_params += ' -metadata ' + key + '=' + shlex.quote(value)
+            metadata_params += ' -metadata ' + key + '=' + shlex.quote(str(value))
 
         # FFmpeg encoding options based on format
         codec_params = self._get_codec_params()
@@ -820,7 +843,7 @@ class PulseAudio:
             return
 
         # Use the application name based on client type
-        application_name = _spotify.application_name
+        application_name = _player_provider.application_name if _player_provider else _client_type
         cmdout = Shell.check_output(
             "pactl list sink-inputs | awk '{print tolower($0)};' | awk '/ #/ {print $0} /application.name = \"" + application_name + "\"/ {print $3};'")
         index = -1
@@ -831,9 +854,6 @@ class PulseAudio:
                 index = last.split(" #", 1)[1]
                 break
             last = line
-
-        # Alternative command:
-        # for i in $(LC_ALL=C pactl list | grep -E '(^Sink Input)|(media.name = \"Spotify\"$)' | cut -d \# -f2 | grep -v Spotify); do echo "$i"; done
 
         pa_spotify_sink_input_id = int(index)
 

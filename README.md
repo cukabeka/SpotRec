@@ -13,70 +13,61 @@ AUR (Linux): https://aur.archlinux.org/packages/spotrec/
 
 ## macOS Setup
 
-### Prerequisites
+The setup process for macOS is handled by a comprehensive setup script.
 
-1. **Install Homebrew** (if not already installed):
-   ```bash
-   /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-   ```
+### 1. Run the Setup Script
 
-2. **Install required dependencies**:
-   ```bash
-   brew install python3 ffmpeg dbus pygobject3
-   ```
-
-3. **Install BlackHole** (virtual audio device):
-   ```bash
-   brew install blackhole-2ch
-   ```
-   Or download from: https://existential.audio/blackhole/
-
-4. **Install ncspot** (recommended for macOS):
-   ```bash
-   brew install ncspot
-   ```
-
-5. **Install Python packages**:
-   ```bash
-   pip3 install requests dbus-python PyGObject
-   ```
-
-### Configure ncspot
-
-Run the provided configuration script to set up ncspot optimally:
+First, make the script executable, then run it:
 
 ```bash
+chmod +x ./configure-ncspot.sh
 ./configure-ncspot.sh
 ```
 
-This will create a configuration file at `~/Library/Application Support/ncspot/config.toml` with optimal settings for recording.
+This script will automatically:
+- Check for and install required Homebrew packages (like `dbus`, `ncspot`, `ffmpeg`).
+- Start the D-Bus service required for communication.
+- Create a Python virtual environment (`venv`) to keep dependencies isolated.
+- Install the required Python packages (`requests`, `dbus-python`, etc.) into the virtual environment.
+- Create a configuration file for `ncspot` that enables the D-Bus interface, which is essential for `SpotRec` to work.
 
-### Configure Audio Routing (BlackHole)
+### 2. Configure Audio Routing (One-Time Setup)
 
-To record audio while still hearing it through your speakers:
+To record `ncspot`'s audio while still hearing it through your speakers, you need to create a "Multi-Output Device". You only have to do this once.
 
-1. Open **Audio MIDI Setup** (`/Applications/Utilities/Audio MIDI Setup.app`)
-2. Click the **'+'** button at the bottom left
-3. Select **'Create Multi-Output Device'**
-4. Check both your regular speakers/headphones **and** **'BlackHole 2ch'**
-5. (Optional) Right-click the Multi-Output Device and select "Use This Device For Sound Output"
+1. Open **Audio MIDI Setup** (located in `/Applications/Utilities/`).
+2. Click the **`+`** button at the bottom left and select **'Create Multi-Output Device'**.
+3. In the list for the new device, check the boxes for both your regular speakers/headphones **and** `BlackHole 2ch`.
+4. Right-click the "Multi-Output Device" you just created and select **"Use This Device For Sound Output"**.
 
-Now audio will play through your speakers AND be routed to BlackHole for recording.
+Now, all system audio will play through your speakers AND be silently routed to the `BlackHole` device, where `SpotRec` can record it.
 
-### Usage on macOS
+## Usage on macOS
 
 1. **Start ncspot**:
-   ```bash
-   ncspot
-   ```
-   Login with your Spotify credentials if this is your first time.
+   Open a terminal and run `ncspot`. If this is your first time, log in. If `ncspot` was running during the setup, **you must restart it** for the new configuration to load.
 
-2. **In another terminal, start SpotRec**:
+2. **Run SpotRec**:
+   Open a **second terminal window**, navigate to the `SpotRec` project directory, and then:
+
    ```bash
+   # Activate the virtual environment
+   source venv/bin/activate
+
+   # Run SpotRec (it will now use the packages from the venv)
    python3 spotrec.py --client ncspot -o ~/Music/SpotRec
    ```
 
-3. **Play music in ncspot** - SpotRec will automatically record each track!
+3. **Play Music**:
+   Start playing music in `ncspot`. `SpotRec` will automatically detect and record each new track into your output directory.
+
+## How it Works on macOS (ncspot)
+
+- **`ncspot`**: A music player for Spotify that runs in the terminal. We install it with Homebrew.
+- **D-Bus**: A system that allows different applications to talk to each other. `SpotRec` uses it to get information from `ncspot` (like the current song title) and to send commands (like "go to previous track" to ensure a clean recording). The setup script enables D-Bus inside `ncspot`'s configuration and makes sure the D-Bus service is running.
+- **`venv` (Virtual Environment)**: This is an isolated sandbox for `SpotRec`'s Python packages (like `dbus-python` and `requests`). It prevents conflicts with other Python projects on your system. `ncspot` does **not** run inside the `venv`; it's a separate, system-level application. The two processes communicate via D-Bus, not via the Python environment.
+- **BlackHole**: A virtual audio driver that creates an invisible audio input/output. We route `ncspot`'s sound to BlackHole so `SpotRec` (using `ffmpeg`) can listen to it and record.
+- **Multi-Output Device**: A feature in macOS that lets you send audio to multiple devices at once. We use it to send `ncspot`'s audio to both your speakers (so you can hear it) and to BlackHole (so `SpotRec` can record it).
 
 ### macOS Command-line Options
 
