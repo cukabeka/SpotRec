@@ -177,9 +177,9 @@ def handle_command_line():
                         action="store_true", default=_use_internal_track_counter)
     parser.add_argument("-a", "--add-cover-art", help="Embed the cover art from Spotify into the file",
                         action="store_true", default=_add_cover_art)
-    parser.add_argument("--client", help="Spotify client type: 'spotify' (default) or 'ncspot'\n"
+    parser.add_argument("--client", help="Spotify client type: 'spotify' (default), 'ncspot', or 'spotify-player'\n"
                                          "Default: " + _client_type, 
-                        choices=["spotify", "ncspot"], default=_client_type)
+                        choices=["spotify", "ncspot", "spotify-player"], default=_client_type)
     parser.add_argument("--playlist-id", help="Spotify playlist ID or URL to automatically record.\n"
                                               "Example: 37i9dQZF1DXcBWIGoYBM5M or\n"
                                               "https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M",
@@ -417,6 +417,8 @@ class DBusProvider(BaseProvider):
         
         if _client_type == "ncspot":
             self.dbus_dest = "org.mpris.MediaPlayer2.ncspot"
+        elif _client_type == "spotify-player":
+            self.dbus_dest = "org.mpris.MediaPlayer2.spotify-player"
         else:
             self.dbus_dest = "org.mpris.MediaPlayer2.spotify"
         
@@ -564,6 +566,9 @@ class DBusProvider(BaseProvider):
 
         record_thread = RecordThread(self)
         record_thread.start()
+
+
+
 
 
 class FFmpeg:
